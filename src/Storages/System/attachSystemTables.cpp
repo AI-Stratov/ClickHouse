@@ -110,6 +110,7 @@
 #include <Storages/System/StorageSystemUserQueryLog.h>
 #include <Storages/System/StorageSystemNamedCollections.h>
 #include <Storages/System/StorageSystemHandlers.h>
+#include <Storages/System/StorageSystemIcebergWarehouses.h>
 #include <Storages/System/StorageSystemRemoteDataPaths.h>
 #include <Storages/System/StorageSystemCertificates.h>
 #include <Storages/System/StorageSystemTokenizers.h>
@@ -3493,6 +3494,12 @@ Contains information about available certificates and their sources.
     attachNoDescription<StorageSystemNamedCollections>(context, system_database, "named_collections", R"DOCS_MD(
 .description
 Contains a list of all named collections which were created via SQL query or parsed from configuration file.
+)DOCS_MD");
+    attachNoDescription<StorageSystemIcebergWarehouses>(context, system_database, "iceberg_warehouses", R"DOCS_MD(
+.description
+Contains the warehouses of the embedded Iceberg REST catalog, created with `CREATE WAREHOUSE`.
+
+Reading this table requires the `SHOW WAREHOUSES` privilege; without it the table appears empty.
 )DOCS_MD");
     attachNoDescription<StorageSystemHandlers>(context, system_database, "handlers", R"DOCS_MD(
 .description

@@ -4800,7 +4800,7 @@ void Server::createServers(
             {
                 try
                 {
-                    handler_factory = createIcebergRESTCatalogHandlerFactory(*this, config);
+                    handler_factory = createIcebergRESTCatalogHandlerFactory(*this);
                 }
                 catch (...)
                 {
@@ -5144,8 +5144,8 @@ void Server::updateServers(
                 force_restart = true;
                 LOG_TRACE(log, "<prometheus.keeper_metrics_only> had been changed, will reload {}", server->getDescription());
             }
-            /// The warehouse name is baked into the Iceberg REST catalog handler factory, so if
-            /// the section changes, the listener must be restarted.
+            /// The Iceberg REST catalog handler factory reads its settings once at construction,
+            /// so any change to the section must restart the listener.
             if ((port_name == "iceberg_rest_catalog.port" || port_name == "iceberg_rest_catalog.secure_port")
                 && !isSameConfiguration(previous_config, config, "iceberg_rest_catalog"))
             {

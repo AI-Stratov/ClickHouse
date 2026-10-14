@@ -16,6 +16,7 @@ from pyiceberg.types import LongType, NestedField, StringType
 
 from helpers.cluster import ClickHouseCluster
 from helpers.config_cluster import minio_access_key, minio_secret_key
+from helpers.test_tools import wait_condition
 
 cluster = ClickHouseCluster(__file__)
 
@@ -51,9 +52,10 @@ DEFAULT_AUTH = ("default", "")
 CATALOG_PORT = 8182
 CATALOG_SECURE_PORT = 8183
 KEEPER_ROOT = "/clickhouse/iceberg_rest_catalog/my_warehouse"
-FORMAT_MARKER = b"IcebergRESTCatalog\nformat_version: 1"
+FORMAT = "IcebergRESTCatalog\nformat_version: 2"
 BUCKET = "warehouse"
 BASE_LOCATION = f"s3://{BUCKET}/my_warehouse"
+NAMED_COLLECTION = "warehouse_storage"
 
 # Iceberg JSON schema as a client sends it in CreateTableRequest.
 DEFAULT_SCHEMA = {
@@ -67,6 +69,9 @@ DEFAULT_SCHEMA = {
 }
 
 
+keeper = None
+
+
 def wait_catalog_ready(timeout=60, instance=None):
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
@@ -78,17 +83,48 @@ def wait_catalog_ready(timeout=60, instance=None):
     raise AssertionError("Catalog port did not start accepting connections")
 
 
+def wait_warehouse(name, instance=None, exists=True):
+    # The catalog server reads Keeper through its own session, which may lag behind the CREATE.
+    wait_condition(
+        lambda: requests.get(
+            catalog_url("/v1/config", instance), params={"warehouse": name}
+        ).status_code,
+        lambda code: code == (200 if exists else 404),
+        max_attempts=300,
+    )
+
+
+def create_warehouse(name, base_location, instance=None, if_not_exists=False):
+    instance = instance or node
+    if_not_exists_clause = "IF NOT EXISTS " if if_not_exists else ""
+    instance.query(
+        f"CREATE WAREHOUSE {if_not_exists_clause}{name} "
+        f"SETTINGS base_location = '{base_location}', storage_named_collection = '{NAMED_COLLECTION}'"
+    )
+    wait_warehouse(name, instance)
+
+
 @pytest.fixture(scope="module")
 def started_cluster():
+    global keeper
     try:
         cluster.start()
-        get_keeper().ensure_path("/aux_root")
+        # One Keeper session for the whole module. It reconnects on its own if Keeper restarts.
+        keeper = cluster.get_kazoo_client("zoo1")
+        keeper.ensure_path("/aux_root")
         if not cluster.minio_client.bucket_exists(BUCKET):
             cluster.minio_client.make_bucket(BUCKET)
         wait_catalog_ready()
         wait_catalog_ready(instance=node_aux)
+        create_warehouse("my_warehouse", BASE_LOCATION)
+        # node_aux keeps its own warehouses in the aux Keeper, so it needs its own CREATE.
+        create_warehouse("my_warehouse", f"s3://{BUCKET}/", instance=node_aux)
         yield cluster
     finally:
+        if keeper is not None:
+            keeper.stop()
+            keeper.close()
+            keeper = None
         cluster.shutdown()
 
 
@@ -98,7 +134,7 @@ def catalog_url(path, instance=None):
 
 
 def get_keeper():
-    return cluster.get_kazoo_client("zoo1")
+    return keeper
 
 
 def restart_node():
@@ -560,7 +596,13 @@ def test_keeper_layout(started_cluster):
     result = create_table(f"{ns}\x1feu-west", "my.table").json()
 
     zk = get_keeper()
-    assert zk.get(KEEPER_ROOT)[0] == FORMAT_MARKER
+    assert json.loads(zk.get(KEEPER_ROOT)[0]) == {
+        "format": FORMAT,
+        "settings": {
+            "base_location": BASE_LOCATION,
+            "storage_named_collection": NAMED_COLLECTION,
+        },
+    }
 
     # Levels are escaped like file names, so the tree stays walkable with a Keeper client.
     escaped = ns.replace("-", "%2D")
@@ -866,26 +908,27 @@ def test_slash_at_name_edge_does_not_retarget(started_cluster):
 
 def test_unsupported_format_is_refused(started_cluster):
     zk = get_keeper()
-    zk.set(KEEPER_ROOT, b"IcebergRESTCatalog\nformat_version: 999")
+    good_data = zk.get(KEEPER_ROOT)[0]
+    bad_data = json.dumps(
+        {"format": "IcebergRESTCatalog\nformat_version: 999", "settings": {}}
+    ).encode()
+    zk.set(KEEPER_ROOT, bad_data)
     try:
-        # The marker is checked when a new Keeper session is opened.
-        restart_node()
-        for _ in range(2):
-            response = catalog_request(
-                "GET", "/v1/my_warehouse/namespaces", expected_code=500
-            )
-            assert_error_shape(response, "InternalServerError")
+        # Every request re-reads a modified warehouse definition. An unknown format is an error, not a silent downgrade.
+        response = catalog_request(
+            "GET", "/v1/my_warehouse/namespaces", expected_code=500
+        )
+        assert_error_shape(response, "InternalServerError")
         assert node.contains_in_log("has an unsupported format")
     finally:
-        zk.set(KEEPER_ROOT, FORMAT_MARKER)
-        restart_node()
+        zk.set(KEEPER_ROOT, good_data)
 
     list_namespaces()
 
 
 def test_bucket_root_base_location(started_cluster):
-    # node_aux is configured with `s3://warehouse/`, the bucket root with a trailing slash.
-    # The server accepted that config at startup. Tables land directly under the bucket.
+    # The warehouse of node_aux was created with `s3://warehouse/`, the bucket root with a trailing slash.
+    # Tables land directly under the bucket.
     ns = f"root_{uuid.uuid4().hex[:8]}"
     ns_url = catalog_url("/v1/my_warehouse/namespaces", node_aux)
     assert requests.post(ns_url, json={"namespace": [ns]}).status_code == 200
@@ -927,3 +970,83 @@ def test_secure_port(started_cluster):
         requests.get(
             f"http://{node.ip_address}:{CATALOG_SECURE_PORT}{path}", auth=DEFAULT_AUTH
         )
+
+
+def test_warehouse_ddl(started_cluster):
+    name = f"wh_{uuid.uuid4().hex[:8]}"
+    create_warehouse(name, f"s3://{BUCKET}/{name}")
+    create_warehouse(name, f"s3://{BUCKET}/{name}", if_not_exists=True)
+
+    error = node.query_and_get_error(
+        f"CREATE WAREHOUSE {name} SETTINGS base_location = 's3://{BUCKET}/{name}', storage_named_collection = '{NAMED_COLLECTION}'"
+    )
+    assert f"Warehouse '{name}' already exists" in error
+
+    config = catalog_request("GET", "/v1/config", params={"warehouse": name}).json()
+    assert config["overrides"]["prefix"] == name
+
+    row = node.query(
+        f"SELECT name, settings['base_location'], settings['storage_named_collection'] "
+        f"FROM system.iceberg_warehouses WHERE name = '{name}' FORMAT TSV"
+    )
+    assert row == f"{name}\ts3://{BUCKET}/{name}\t{NAMED_COLLECTION}\n"
+
+    # A warehouse with namespaces cannot be dropped. Nothing is removed.
+    response = requests.post(catalog_url(f"/v1/{name}/namespaces"), json={"namespace": ["ns"]})
+    assert response.status_code == 200, response.text
+    error = node.query_and_get_error(f"DROP WAREHOUSE {name}")
+    assert f"Warehouse '{name}' is not empty" in error
+    assert requests.get(catalog_url(f"/v1/{name}/namespaces")).status_code == 200
+
+    # Drop the namespace through Keeper: the REST API has no DROP NAMESPACE yet.
+    zk = get_keeper()
+    zk.delete(f"/clickhouse/iceberg_rest_catalog/{name}/namespaces/ns", recursive=True)
+
+    node.query(f"DROP WAREHOUSE {name}")
+    wait_warehouse(name, exists=False)
+    assert node.query(f"SELECT count() FROM system.iceberg_warehouses WHERE name = '{name}'") == "0\n"
+
+    error = node.query_and_get_error(f"DROP WAREHOUSE {name}")
+    assert f"Warehouse '{name}' does not exist" in error
+    node.query(f"DROP WAREHOUSE IF EXISTS {name}")
+
+
+def test_warehouse_validation(started_cluster):
+    def create_error(name, settings):
+        return node.query_and_get_error(f"CREATE WAREHOUSE {name} SETTINGS {settings}")
+
+    good = f"base_location = 's3://{BUCKET}/x', storage_named_collection = '{NAMED_COLLECTION}'"
+    assert "Warehouse name" in create_error("`bad.name`", good)
+    assert "Unknown warehouse setting 'colour'" in create_error("wh_v", good + ", colour = 'red'")
+    assert "'base_location' is required" in create_error(
+        "wh_v", f"storage_named_collection = '{NAMED_COLLECTION}'"
+    )
+    assert "must start with s3://" in create_error(
+        "wh_v", f"base_location = 'gs://{BUCKET}/x', storage_named_collection = '{NAMED_COLLECTION}'"
+    )
+    assert "is not inside bucket" in create_error(
+        "wh_v", f"base_location = 's3://other-bucket/x', storage_named_collection = '{NAMED_COLLECTION}'"
+    )
+    assert node.query("SELECT count() FROM system.iceberg_warehouses WHERE name = 'wh_v'") == "0\n"
+
+
+def test_warehouse_access(started_cluster):
+    node.query("CREATE USER IF NOT EXISTS wh_user")
+    try:
+        error = node.query_and_get_error(
+            f"CREATE WAREHOUSE wh_denied SETTINGS base_location = 's3://{BUCKET}/d', storage_named_collection = '{NAMED_COLLECTION}'",
+            user="wh_user",
+        )
+        assert "Not enough privileges" in error
+        assert "CREATE WAREHOUSE" in error
+
+        error = node.query_and_get_error("DROP WAREHOUSE my_warehouse", user="wh_user")
+        assert "Not enough privileges" in error
+
+        # Without SHOW WAREHOUSES the table is empty.
+        node.query("GRANT SELECT ON system.iceberg_warehouses TO wh_user")
+        assert node.query("SELECT count() FROM system.iceberg_warehouses", user="wh_user") == "0\n"
+        node.query("GRANT SHOW WAREHOUSES ON *.* TO wh_user")
+        assert "my_warehouse" in node.query("SELECT name FROM system.iceberg_warehouses", user="wh_user")
+    finally:
+        node.query("DROP USER IF EXISTS wh_user")

@@ -6,6 +6,8 @@
 #include <Poco/JSON/Array.h>
 #include <Poco/JSON/Object.h>
 
+#include <map>
+
 namespace DB
 {
 
@@ -14,6 +16,9 @@ String toJSONString(const Poco::JSON::Object & json, unsigned indent = 0);
 
 /// Throws `INCORRECT_DATA` if `data` is not a JSON object. `what` names the data for the message, e.g. "Table pointer at /path".
 Poco::JSON::Object::Ptr parseJSONObject(const String & data, const String & what);
+
+Poco::JSON::Object::Ptr stringMapToJSON(const std::map<String, String> & map);
+std::map<String, String> stringMapFromJSON(const Poco::JSON::Object & json, const String & what);
 
 /// Helpers to validate client requests. They throw `BAD_ARGUMENTS` for a missing or wrong-typed key.
 namespace IcebergRESTCatalogJSON

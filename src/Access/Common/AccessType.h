@@ -150,7 +150,7 @@ ENUM_ACCESS_OBJECT(Source, APPLY_FOR_SOURCE)
 
 
 /// Represents an access type which can be granted on databases, tables, columns, etc.
-enum class AccessType : uint8_t
+enum class AccessType : uint16_t
 {
 /// Macro M should be defined as M(name, aliases, node_type, parent_group_name)
 /// where name is identifier with underscores (instead of spaces);
@@ -318,6 +318,10 @@ enum class AccessType : uint8_t
     M(SHOW_NAMED_COLLECTIONS_SECRETS, "SHOW NAMED COLLECTIONS SECRETS", NAMED_COLLECTION, NAMED_COLLECTION_ADMIN) \
     M(NAMED_COLLECTION, "NAMED COLLECTION USAGE, USE NAMED COLLECTION", NAMED_COLLECTION, NAMED_COLLECTION_ADMIN) \
     M(NAMED_COLLECTION_ADMIN, "NAMED COLLECTION CONTROL", NAMED_COLLECTION, ALL) \
+    M(CREATE_WAREHOUSE, "", GLOBAL, WAREHOUSE_ADMIN) /* allows to execute CREATE WAREHOUSE */ \
+    M(DROP_WAREHOUSE, "", GLOBAL, WAREHOUSE_ADMIN) /* allows to execute DROP WAREHOUSE */ \
+    M(SHOW_WAREHOUSES, "", GLOBAL, WAREHOUSE_ADMIN) /* allows to see warehouses in system.iceberg_warehouses */ \
+    M(WAREHOUSE_ADMIN, "WAREHOUSE CONTROL", GROUP, ALL) \
     M(SHOW_HANDLERS, "SHOW HANDLER", GLOBAL, ALL) /* allows to see SQL-defined HTTP handlers in system.handlers */\
     M(SET_DEFINER, "", DEFINER, ALL) \
     \

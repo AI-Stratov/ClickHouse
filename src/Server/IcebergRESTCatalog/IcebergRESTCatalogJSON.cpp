@@ -37,6 +37,26 @@ Poco::JSON::Object::Ptr parseJSONObject(const String & data, const String & what
     }
 }
 
+Poco::JSON::Object::Ptr stringMapToJSON(const std::map<String, String> & map)
+{
+    Poco::JSON::Object::Ptr json = new Poco::JSON::Object;
+    for (const auto & [key, value] : map)
+        json->set(key, value);
+    return json;
+}
+
+std::map<String, String> stringMapFromJSON(const Poco::JSON::Object & json, const String & what)
+{
+    std::map<String, String> map;
+    for (const auto & [key, value] : json)
+    {
+        if (!value.isString())
+            throw Exception(ErrorCodes::INCORRECT_DATA, "{}: '{}' is not a string", what, key);
+        map[key] = value.extract<String>();
+    }
+    return map;
+}
+
 namespace IcebergRESTCatalogJSON
 {
 

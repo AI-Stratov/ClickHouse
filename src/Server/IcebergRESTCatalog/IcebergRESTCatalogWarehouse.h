@@ -2,8 +2,10 @@
 
 #include <base/types.h>
 #include <Disks/DiskObjectStorage/ObjectStorages/IObjectStorage_fwd.h>
+#include <Interpreters/Context_fwd.h>
+#include <Server/IcebergRESTCatalog/IcebergRESTCatalogConfig.h>
+#include <Server/IcebergRESTCatalog/IcebergRESTCatalogWarehouseMetadata.h>
 
-#include <map>
 #include <memory>
 
 namespace DB
@@ -33,34 +35,7 @@ struct IcebergRESTCatalogWarehouse
 
 using IcebergRESTCatalogWarehousePtr = std::shared_ptr<const IcebergRESTCatalogWarehouse>;
 
-String stripTrailingSlashes(String location);
-/// The server reads only `s3://` locations. A bare key cannot be checked against the bucket.
-bool hasS3Scheme(const String & location);
-
-/// Experimental scaffolding. Currently, the server config holds the warehouse definition.
-/// It is only read on startup.
-///
-/// TODO: Remove warehouses from config, store warehouses in Keeper, and manage them with SQL.
-/// Have `tryGet` search in Keeper and remove the const map of warehouses.
-class IcebergRESTCatalogWarehouses
-{
-public:
-    using Map = std::map<String, IcebergRESTCatalogWarehousePtr>;
-
-    explicit IcebergRESTCatalogWarehouses(Map warehouses_) : warehouses(std::move(warehouses_)) {}
-
-    IcebergRESTCatalogWarehousePtr tryGet(const String & name) const
-    {
-        auto it = warehouses.find(name);
-        if (it == warehouses.end())
-            return nullptr;
-        return it->second;
-    }
-
-private:
-    const Map warehouses;
-};
-
-using IcebergRESTCatalogWarehousesPtr = std::shared_ptr<const IcebergRESTCatalogWarehouses>;
+IcebergRESTCatalogWarehousePtr createIcebergRESTCatalogWarehouse(
+    ContextPtr context, const String & name, const IcebergRESTCatalogWarehouseMetadata & metadata, const IcebergRESTCatalogConfig & catalog_config);
 
 }

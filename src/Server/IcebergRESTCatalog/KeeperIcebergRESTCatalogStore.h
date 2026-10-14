@@ -25,7 +25,7 @@ struct IcebergTablePointer
 /// Storage backend of the native Iceberg REST catalog (RFC: issue #114697), backed by Keeper.
 /// Work in progress, not ready for production use.
 /// Layout under `root_path` (one root per warehouse):
-///   <root>                                 data: format marker
+///   <root>                                 data: JSON warehouse metadata with the format version, written by CREATE WAREHOUSE
 ///   <root>/namespaces/<level>              data: JSON object of namespace properties
 ///   <root>/namespaces/<level>/namespaces   child namespaces, same shape recursively
 ///   <root>/namespaces/<level>/tables       one child per table
@@ -66,10 +66,8 @@ public:
     bool dropTable(const IcebergNamespaceName & ns, const String & table);
 
 private:
-    /// Returns the current session. Runs `initRoot` once per new session.
+    /// Returns the current session. Runs `sync` once per new session.
     zkutil::ZooKeeperPtr getZooKeeper() const;
-    /// Creates the root nodes and checks the format marker.
-    void initRoot(const zkutil::ZooKeeperPtr & zookeeper) const;
 
     String namespacePath(const IcebergNamespaceName & name) const;
     /// Node that holds the direct children of `name`. Empty `name` means the root list.
@@ -81,9 +79,9 @@ private:
     const String root_path;
     const zkutil::GetZooKeeper get_zookeeper;
 
-    /// The session that passed `initRoot`. Requests wait here while a new session is initialized.
+    /// The session that was synced. Requests wait here while a new session is synced.
     mutable std::mutex mutex;
-    mutable zkutil::ZooKeeperPtr initialized_zookeeper TSA_GUARDED_BY(mutex);
+    mutable zkutil::ZooKeeperPtr synced_zookeeper TSA_GUARDED_BY(mutex);
 };
 
 using KeeperIcebergRESTCatalogStorePtr = std::shared_ptr<KeeperIcebergRESTCatalogStore>;

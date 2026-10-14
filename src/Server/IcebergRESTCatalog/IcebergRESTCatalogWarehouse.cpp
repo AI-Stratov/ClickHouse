@@ -1,11 +1,21 @@
 #include <Server/IcebergRESTCatalog/IcebergRESTCatalogWarehouse.h>
 
+#include "config.h"
+
 #include <Common/Exception.h>
 #include <Disks/DiskObjectStorage/ObjectStorages/IObjectStorage.h>
+#include <Interpreters/Context.h>
+#include <Parsers/ASTIdentifier.h>
+#include <Server/IcebergRESTCatalog/IcebergRESTCatalogLocation.h>
+#include <Server/IcebergRESTCatalog/KeeperIcebergRESTCatalogStore.h>
+#include <Storages/ObjectStorage/StorageObjectStorageConfiguration.h>
+
+#if USE_AWS_S3
+#include <Storages/ObjectStorage/S3/Configuration.h>
+#endif
 
 #include <fmt/format.h>
 
-#include <optional>
 
 namespace DB
 {
@@ -13,30 +23,28 @@ namespace DB
 namespace ErrorCodes
 {
     extern const int INCORRECT_DATA;
-    extern const int INVALID_CONFIG_PARAMETER;
+    extern const int BAD_ARGUMENTS;
+    extern const int SUPPORT_IS_DISABLED;
 }
 
 namespace
 {
 
-constexpr std::string_view S3_SCHEME = "s3://";
-
-/// Splits `s3://<bucket>/<key>` into the bucket and the key. The key may be empty.
-struct S3Location
+/// S3 client of a warehouse, built from its named collection.
+/// The client is built once per warehouse, so a later `ALTER NAMED COLLECTION` applies only after a server restart.
+/// TODO: On each request, hash the current content of the named collection and rebuild the client when the hash changed.
+ObjectStoragePtr createObjectStorage([[maybe_unused]] ContextPtr context, [[maybe_unused]] const String & storage_named_collection)
 {
-    String bucket;
-    String key;
-};
+#if USE_AWS_S3
+    auto configuration = std::make_shared<StorageS3Configuration>();
+    ASTs args;
+    args.push_back(make_intrusive<ASTIdentifier>(storage_named_collection));
+    StorageObjectStorageConfiguration::initialize(*configuration, args, context, /*with_table_structure*/ false);
 
-std::optional<S3Location> parseS3Location(const String & location)
-{
-    /// TODO: support s3a:// and s3n://
-    if (!location.starts_with(S3_SCHEME))
-        return std::nullopt;
-    const auto slash = location.find('/', S3_SCHEME.size());
-    if (slash == String::npos)
-        return S3Location{.bucket = location.substr(S3_SCHEME.size()), .key = ""};
-    return S3Location{.bucket = location.substr(S3_SCHEME.size(), slash - S3_SCHEME.size()), .key = location.substr(slash + 1)};
+    return configuration->createObjectStorage(context, /*is_readonly*/ false, std::nullopt);
+#else
+    throw Exception(ErrorCodes::SUPPORT_IS_DISABLED, "The Iceberg REST catalog needs S3 support, but this build has none");
+#endif
 }
 
 }
@@ -48,7 +56,7 @@ IcebergRESTCatalogWarehouse::IcebergRESTCatalogWarehouse(
     /// The server has credentials for one bucket only, so the default table location must be in it.
     if (!isInBucket(base_location))
         throw Exception(
-            ErrorCodes::INVALID_CONFIG_PARAMETER,
+            ErrorCodes::BAD_ARGUMENTS,
             "base_location {} of warehouse {} is not inside bucket '{}' of its object storage",
             base_location,
             name,
@@ -57,28 +65,28 @@ IcebergRESTCatalogWarehouse::IcebergRESTCatalogWarehouse(
 
 bool IcebergRESTCatalogWarehouse::isInBucket(const String & location) const
 {
-    const auto parsed = parseS3Location(location);
+    const auto parsed = IcebergRESTCatalog::parseS3Location(location);
     return parsed && parsed->bucket == object_storage->getObjectsNamespace();
 }
 
 String IcebergRESTCatalogWarehouse::objectKey(const String & location) const
 {
-    const auto parsed = parseS3Location(location);
+    const auto parsed = IcebergRESTCatalog::parseS3Location(location);
     if (!parsed || parsed->bucket != object_storage->getObjectsNamespace())
         throw Exception(ErrorCodes::INCORRECT_DATA, "Location {} is outside the bucket of warehouse {}", location, name);
     return parsed->key;
 }
 
-String stripTrailingSlashes(String location)
+IcebergRESTCatalogWarehousePtr createIcebergRESTCatalogWarehouse(
+    ContextPtr context, const String & name, const IcebergRESTCatalogWarehouseMetadata & metadata, const IcebergRESTCatalogConfig & catalog_config)
 {
-    while (location.ends_with('/'))
-        location.pop_back();
-    return location;
-}
+    auto keeper_store = std::make_shared<KeeperIcebergRESTCatalogStore>(
+        [context, catalog_config] { return catalog_config.getZooKeeper(*context); },
+        catalog_config.warehousePath(name));
 
-bool hasS3Scheme(const String & location)
-{
-    return location.starts_with(S3_SCHEME);
+    auto object_storage = createObjectStorage(context, metadata.storage_named_collection);
+
+    return std::make_shared<const IcebergRESTCatalogWarehouse>(name, metadata.base_location, std::move(keeper_store), std::move(object_storage));
 }
 
 }

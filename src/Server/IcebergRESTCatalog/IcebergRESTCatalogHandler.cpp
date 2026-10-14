@@ -20,6 +20,7 @@
 #include <Server/HTTPHandler.h>
 #include <Server/IServer.h>
 #include <Server/IcebergRESTCatalog/IcebergRESTCatalogJSON.h>
+#include <Server/IcebergRESTCatalog/IcebergRESTCatalogLocation.h>
 #include <Server/IcebergRESTCatalog/IcebergRESTCatalogStorage.h>
 #include <Server/IcebergRESTCatalog/IcebergRESTCatalogCreateTable.h>
 
@@ -172,7 +173,7 @@ Poco::JSON::Object tableIdentifierToJSON(const IcebergNamespaceName & ns, const 
 
 }
 
-IcebergRESTCatalogHandler::IcebergRESTCatalogHandler(IServer & server_, IcebergRESTCatalogWarehousesPtr warehouses_)
+IcebergRESTCatalogHandler::IcebergRESTCatalogHandler(IServer & server_, IcebergRESTCatalogWarehouseRegistryPtr warehouses_)
     : log(getLogger("IcebergRESTCatalogHandler"))
     , server(server_)
     , warehouses(std::move(warehouses_))
@@ -573,7 +574,7 @@ void IcebergRESTCatalogHandler::handleCreateNamespace(const IcebergRESTCatalogWa
         /// Tables of the namespace go under `location`. The server has credentials for one bucket only, so refuse others now.
         if (const auto it = properties.find("location"); it != properties.end())
         {
-            if (!hasS3Scheme(it->second))
+            if (!IcebergRESTCatalog::hasS3Scheme(it->second))
                 throw Poco::Exception("the 'location' property must be an s3:// URI");
             if (!warehouse.isInBucket(it->second))
                 throw Poco::Exception("the 'location' property must be inside the warehouse bucket");
@@ -754,7 +755,7 @@ void IcebergRESTCatalogHandler::handleCreateTable(
         if (const auto it = namespace_properties->find("location"); it != namespace_properties->end())
         {
             /// The uuid suffix keeps a dropped and recreated table away from the old files.
-            location = fmt::format("{}/{}-{}", stripTrailingSlashes(it->second), name, uuid);
+            location = fmt::format("{}/{}-{}", IcebergRESTCatalog::stripTrailingSlashes(it->second), name, uuid);
         }
         else
         {
