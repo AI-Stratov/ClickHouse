@@ -340,7 +340,7 @@ void writeMessageToFile(
         /// Iceberg metadata snappy is always the Hadoop block format (`SnappyMode::Basic`),
         /// independent of the session `snappy_mode`. The wire format is not encoded in the
         /// `.snappy.metadata.json` suffix, so it must be deterministic for the read path (which
-        /// always decodes basic, see `getMetadataJSONObject`) to round-trip its own metadata and
+        /// always decodes basic, see `getMetadataObject`) to round-trip its own metadata and
         /// stay interoperable with other Iceberg engines.
         auto compressed_buffer_metadata = wrapWriteBufferWithCompressionMethod(
             std::move(buffer_metadata),
@@ -632,7 +632,7 @@ std::string normalizeUuid(const std::string & uuid)
     return result;
 }
 
-Poco::JSON::Object::Ptr getMetadataJSONObject(
+MetadataObject::Ptr getMetadataObject(
     const String & metadata_file_path,
     ObjectStoragePtr object_storage,
     IcebergMetadataFilesCachePtr metadata_cache,
@@ -666,16 +666,22 @@ Poco::JSON::Object::Ptr getMetadataJSONObject(
         return json_str;
     };
 
-    String metadata_json_str;
     if (metadata_cache && table_uuid.has_value())
-        metadata_json_str = metadata_cache->getOrSetTableMetadata(
+        return metadata_cache->getOrSetTableMetadata(
             IcebergMetadataFilesCache::getKey(*table_uuid, metadata_file_path), create_fn);
-    else
-        metadata_json_str = create_fn();
+    return std::make_shared<const MetadataObject>(create_fn());
+}
 
-    Poco::JSON::Parser parser; /// For some reason base/base/JSON.h can not parse this json file
-    Poco::Dynamic::Var json = parser.parse(metadata_json_str);
-    return json.extract<Poco::JSON::Object::Ptr>();
+Poco::JSON::Object::Ptr getMetadataObjectParsed(
+    const String & metadata_file_path,
+    ObjectStoragePtr object_storage,
+    IcebergMetadataFilesCachePtr metadata_cache,
+    const ContextPtr & local_context,
+    LoggerPtr log,
+    CompressionMethod compression_method,
+    const std::optional<String> & table_uuid)
+{
+    return getMetadataObject(metadata_file_path, object_storage, metadata_cache, local_context, log, compression_method, table_uuid)->getParsed();
 }
 
 /// Iceberg stores a decimal as its unscaled value in two's-complement big-endian form, in the
@@ -1434,7 +1440,7 @@ static MetadataFileWithInfo getLatestMetadataFileAndVersion(
 
             if (need_all_metadata_files_parsing)
             {
-                auto metadata_file_object = getMetadataJSONObject(
+                auto metadata_file_object = getMetadataObjectParsed(
                     metadata_file_path, object_storage, metadata_cache, local_context, log, compression_method, table_uuid);
                 if (table_uuid.has_value() && use_table_uuid_for_metadata_file_selection)
                 {
